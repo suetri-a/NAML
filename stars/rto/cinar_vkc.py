@@ -75,12 +75,27 @@ class CinarVKC(RtoBase):
         self.numSPHIST = 22
 
 
+    def get_reaction_dict(self):
+
+        if not self.parsed:
+            self.parse_stars_output()
+        ydict = {}
+
+        ydict['N2'] = self.SPEC_VALS[:,7][1:]
+        ydict['O2'] = self.SPEC_VALS[:,8][1:]
+        ydict['H2O'] = self.SPEC_VALS[:,9][1:]
+        ydict['CO'] = self.SPEC_VALS[:,10][1:]
+        ydict['CO2'] = self.SPEC_VALS[:,11][1:]
+        ydict['Temp'] = self.SPEC_VALS[:,21][1:] - 273.15
+
+        return 24*60*self.t, ydict
+
     def get_O2_consumption(self):
 
         if not self.parsed:
-            self.O2_PROD = self.SPEC_VALS[:,17] 
-            self.TEMP_avg = self.SPEC_VALS[:,21]
-            self.parsed = True
+            self.parse_stars_output()
+        self.O2_PROD = self.SPEC_VALS[:,8][1:]
+        self.TEMP_avg = self.SPEC_VALS[:,21][1:]
 
         return self.O2_PROD
 
@@ -89,8 +104,8 @@ class CinarVKC(RtoBase):
         print('** ============== INPUT/OUTPUT CONTROL ======================', file=fileID)
         print("""
 RESULTS SIMULATOR STARS 201710
-*TITLE1 'ENSAYO RTO 1.7 C/min - Core @ 1200 psi'
-*TITLE2 'ICP-Stanford University'
+*TITLE1 'CINAR VKC Simulation'
+*TITLE2 'ICP - Stanford University'
 *INTERRUPT 	*STOP
 *INUNIT 	*LAB
 *OUTUNIT 	*LAB
@@ -107,7 +122,7 @@ RESULTS SIMULATOR STARS 201710
 *OUTSRF *SPECIAL MATBAL CURRENT 'CO'
 *OUTSRF *SPECIAL MATBAL CURRENT 'CO2'
 *OUTSRF *SPECIAL MATBAL CURRENT 'Coke2'
-*OUTSRF *SPECIAL MATBAL CURRENT 'OIL'
+*OUTSRF *SPECIAL MATBAL CURRENT 'HEAVY OIL'
 *OUTSRF *SPECIAL MATBAL CURRENT 'H2O'
 *OUTSRF *SPECIAL MOLEFRAC 'PROD' 'N2'
 *OUTSRF *SPECIAL MOLEFRAC 'PROD' 'O2'
@@ -120,7 +135,7 @@ RESULTS SIMULATOR STARS 201710
 *OUTSRF *SPECIAL MATBAL REACTION 'CO'
 *OUTSRF *SPECIAL MATBAL REACTION 'CO2'
 *OUTSRF *SPECIAL MATBAL REACTION 'Coke2'
-*OUTSRF *SPECIAL MATBAL REACTION 'OIL'
+*OUTSRF *SPECIAL MATBAL REACTION 'HEAVY OIL'
 *OUTSRF *SPECIAL MATBAL REACTION 'H2O'
 *OUTSRF *SPECIAL MATBAL REACTION ENERGY
 *OUTSRF *SPECIAL AVGVAR TEMP
@@ -318,7 +333,7 @@ PINCHOUTARRAY CON 1
               """, file = fileID)
 
     
-    def print_initial_cond(self, fileID):
+    def print_initial_cond(self, fileID, IC_dict):
         print('**  ==============  INITIAL CONDITIONS  ======================', file = fileID)
         print("""
 *INITIAL
@@ -334,22 +349,23 @@ PINCHOUTARRAY CON 1
 
 *SO *IJK 
 **OIL_SAT
-		 1 1 1:11 0.031
+		 1 1 1:11 {OIL_SAT}
 **O_SATEND
          2 1 1:11 0.0
 
 *SG *IJK 
 **GAS_SAT
-	     1 1 1:11 0.969
+	     1 1 1:11 {GAS_SAT}
 **G_SATEND
          2 1 1:11 0.0
 
 **Gas in tube is air(79%N2 & 21%O2)
 **MFRAC_GAS 'N2' CON       1
-*MFRAC_GAS 'O2' *con 0.2094
-*MFRAC_GAS 'N2' *con 0.7906      
+*MFRAC_GAS 'O2' *con {O2_con}
+*MFRAC_GAS 'N2' *con {N2_con}      
         
-              """, file = fileID)
+              """.format(OIL_SAT=IC_dict['Oil'], GAS_SAT=1-IC_dict['Oil'], O2_con=IC_dict['O2'], N2_con=1-IC_dict['O2']), 
+                        file = fileID)
     
     def print_numerical(self, fileID):
         print('**  ==============  NUMERICAL CONTROL  ======================', file = fileID)
@@ -365,7 +381,7 @@ PINCHOUTARRAY CON 1
               """, file = fileID)
 
     
-    def print_recurrent(self, fileID):
+    def print_recurrent(self, fileID, O2_con_in):
         print('**  ==============  RECURRENT DATA  ======================', file = fileID)
         print("""
 
@@ -374,7 +390,7 @@ PINCHOUTARRAY CON 1
 *WELL   'INJE'
 *WELL   'PROD'
 *INJECTOR UNWEIGHT 'INJE'
-*INCOMP  GAS  0.  0.  0.7906  0.2094  0.  0.
+*INCOMP  GAS  0.  0.  {N2_in}  {O2_in}  0.  0.
 *TINJW  26.
 *OPERATE  MAX  STG  166.67  CONT
 *GEOMETRY  K  1.5  1.  1.  0.
@@ -386,7 +402,7 @@ PINCHOUTARRAY CON 1
 *PERF  TUBE-END  'PROD'
 1 1 11  1.  OPEN    FLOW-TO  'SURFACE'      
         
-              """, file = fileID)
+              """.format(N2_in = 1-O2_con_in, O2_in = O2_con_in), file = fileID)
 
     
     def print_heater(self, fileID):
@@ -400,11 +416,11 @@ PINCHOUTARRAY CON 1
               """, file = fileID)
 
     
-    def print_heating_ramp(self, fileID, HR):
+    def print_heating_ramp(self, fileID, HR, tfinal, tempmax):
         print('** ==========Linear Ramped Heating==========', file=fileID)
 
-        for t in range(499):
-            if (20 + HR*t) > 750:
+        for t in range(int(tfinal)):
+            if (20 + HR*t) > tempmax:
                 print('*TIME ', str(t+1), file = fileID)
                 print('*TMPSET *IJK 2 1 1:11 ', str(750), file = fileID)
                 print("*INJECTOR 'INJE'", file = fileID)
@@ -414,4 +430,4 @@ PINCHOUTARRAY CON 1
                 print('*TMPSET *IJK 2 1 1:11 ', str(20 + HR*t), file = fileID)
                 print("*INJECTOR 'INJE'", file = fileID)
                 print('*TINJW ', str(20 + HR*t), file = fileID)
-        print('*TIME  500', file = fileID)
+        print('*TIME  {}'.format(tfinal), file = fileID)
