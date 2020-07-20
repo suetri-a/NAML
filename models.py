@@ -1,7 +1,9 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import tikzplotlib as tikz
 import os
+import re
 
 from scipy.integrate import solve_ivp, cumtrapz
 from scipy.optimize import minimize
@@ -10,49 +12,118 @@ from scipy.stats import linregress, norm, truncnorm
 from abc import ABC, abstractmethod
 
 
-def load_rto_data(data_path, clean_data = True):
+def load_rto_data(data_path, clean_data = True, return_O2_con_in = False):
 
     df = pd.read_excel(data_path + '.xls')
+    
     # Read in data
-    Time = df.Time.values
+    Time = df.Time.values/60
     O2 = df.O2.values
+    CO2 = df.CO2.values
     if hasattr(df, 'Temperature'):
         Temp = df.Temperature.values
-    else:
+    elif hasattr(df, 'Temp'):
         Temp = df.Temp.values
+    else:
+        raise Exception('Input data file {} does not contain valid field for temperature.'.format(data_path + '.xls'))
 
-    # Perform data cleaning if necessary
+
     if clean_data:
         ind100C = np.amin(np.asarray(Temp > 100).nonzero())
-        ind200C = np.amin(np.asarray(Temp > 180).nonzero())
+        ind120C = np.amin(np.asarray(Temp > 120).nonzero())
         inds750 = np.asarray(Temp > 745).nonzero()[0]
         ind750C1 = inds750[np.round(0.75*inds750.shape[0]).astype(int)]
         ind750C2 = inds750[np.round(0.9*inds750.shape[0]).astype(int)]
-
+        
         # Gather datapoints and perform linear regression correction
-        correction_times = np.concatenate([Time[ind100C:ind200C+1], Time[ind750C1:ind750C2+1]])
-        correction_O2s = np.concatenate([O2[ind100C:ind200C+1], O2[ind750C1:ind750C2+1]])
+        correction_times = np.concatenate([Time[ind100C:ind120C+1], Time[ind750C1:ind750C2+1]])
+        correction_O2s = np.concatenate([O2[ind100C:ind120C+1], O2[ind750C1:ind750C2+1]])
         slope, intercept, _, _, _ = linregress(correction_times, correction_O2s)
         O2_baseline = slope*Time + intercept
-        
-        # Calculate %O2 consumption and conversion
-        O2_consumption = np.maximum(O2_baseline - O2, 0)
-        O2_consumption[:ind200C] = 0 # zero out non-reactive regions
-        O2_consumption[ind750C1:] = 0
-        O2_conversion = cumtrapz(O2_consumption, x=Time, initial=0)
-        O2_conversion /= O2_conversion[-1]
-        dO2_conversion = np.gradient(O2_conversion, Time/60)
-
+        O2_con_in = intercept
     else:
-        ind80C = np.amin(np.asarray(Temp > 80).nonzero())
-        O2_baseline = O2[-1]
-        O2_consumption = np.maximum(O2_baseline - O2, 0)
-        O2_consumption[:ind80C] = 0
-        O2_conversion = cumtrapz(O2_consumption, x=Time, initial=0)
-        O2_conversion /= O2_conversion[-1]
-        dO2_conversion = np.gradient(O2_conversion, Time/60)
+        O2_baseline = O2[0]*np.ones_like(Time)
+        O2_con_in = O2[0]
 
+    # Calculate %O2 consumption and conversion
+    O2_consumption = np.maximum(O2_baseline - O2, 0)
+    
+    start_ind_max, end_ind_max_O2 = find_start_end(O2_consumption)
+    O2_consumption[:start_ind_max] = 0
+    O2_consumption[end_ind_max_O2:] = 0
+    
+    # Finalize temperature and consumption data
+    Time = Time[:end_ind_max_O2]
+    Temp = Temp[:end_ind_max_O2]
+    O2_consumption = O2_consumption[:end_ind_max_O2]
+
+    # Calculate %O2 conversion
+    O2_conversion = cumtrapz(O2_consumption, x=Time, initial=0)
+    O2_conversion /= O2_conversion[-1]
+    dO2_conversion = np.gradient(O2_conversion, Time)
+    
     return Time, dO2_conversion, O2_conversion, Temp
+    
+
+def find_start_end(x):
+    '''
+    Find start and end indices from array x
+    
+    '''
+    
+    start_ind = 0
+    end_ind = 0
+    start_ind_max = 0
+    end_ind_max = x.shape[0]
+    cumsum = 0.0
+    max_cumsum = 0.0
+    for i in range(x.shape[0]):
+        if x[i] <= 0:
+            if cumsum > max_cumsum:
+                max_cumsum = cumsum
+                start_ind_max = start_ind
+                end_ind_max = end_ind
+            
+            cumsum = 0.0
+            start_ind = i
+            end_ind = i
+                
+        else:
+            cumsum += x[i]
+            end_ind += 1
+    
+    return start_ind_max, end_ind_max
+
+
+def create_simulation_overlays(nainterp, naml, data_container, save_path):
+    for i, hr in enumerate(data_container.heating_rates):
+        print(hr)
+        Time = data_container.Times[i,:]
+        Temp = data_container.Temps[i,:]
+        O2 = data_container.O2convs[i,:]
+        
+        y0=[0.0]
+        tspan=[Time[0], Time[-1]]
+        heating=[Time, Temp]
+        t_interp, y_interp = nainterp.simulate_rto(y0, tspan, heating, max_temp=Temp.max())
+        O2_interp = np.interp(Time, t_interp, np.squeeze(y_interp))
+        MSE_interp = data_container.compute_sim_mse({'Time': Time, 'Temp': Temp, 'O2conv': O2}, 
+                                                    {'Time': Time, 'O2conv': O2_interp})
+        
+        t_ml, y_ml = naml.simulate_rto(y0, tspan, heating, max_temp=Temp.max())
+        O2_ml = np.interp(Time, t_ml, np.squeeze(y_ml))
+        MSE_ml = data_container.compute_sim_mse({'Time': Time, 'Temp': Temp, 'O2conv': O2},
+                                                {'Time': Time, 'O2conv': O2_ml})
+        
+        legend_entries = ['Ground truth', 
+                        'Interpolation \n (MSE={0:.2e})'.format(MSE_interp),
+                        'NAMLA \n (MSE={0:.2e})'.format(MSE_ml)]
+        
+        naml.overlay_curves([{'Time': Time, 'Temp': Temp, 'O2conv': O2},
+                            {'Time': Time, 'Temp': Temp, 'O2conv': O2_interp},
+                            {'Time': Time, 'Temp': Temp, 'O2conv': O2_ml}],
+                            legend_entries=legend_entries,
+                            save_path=save_path[:-4]+'_{}'.format(hr)+save_path[-4:])
 
 
 class NonArrheniusBase(ABC):
@@ -64,23 +135,18 @@ class NonArrheniusBase(ABC):
 
         kwargs.setdefault('heating_rates', None)
         kwargs.setdefault('clean_data', True)
-        kwargs.setdefault('interpnum',200)
+        kwargs.setdefault('interpnum', 200)
 
         expdirname = os.path.join('datasets', self.oil_type, self.experiment)
-        hr_names = [name[:-4] for name in os.listdir(expdirname) if name[-4:].lower()=='.xls']
-                
+
         if kwargs['heating_rates'] is None:
-            self.heating_rates = hr_names
+            hr_names = [name[:-4] for name in os.listdir(expdirname) if name[-4:].lower()=='.xls']
         else:
-            self.heating_rates = [hr for hr in hr_names if hr in kwargs['heating_rates']]
+            hr_names = kwargs['heating_rates']
         
-        # # Remove heating rates to be ignored
-        # if kwargs['ignore_heating_rates'] is not None:
-        #     for hr in kwargs['ignore_heating_rates']:
-        #         if hr in self.heating_rates:
-        #             i = self.heating_rates.index(hr)
-        #             del self.heating_rates[i]
-        #             del hr_names[i]
+        hr_inds = np.argsort(np.array([float(re.findall(r"[-+]?\d*\.\d+|\d+", h)[0]) for h in hr_names]))
+        hr_names = [hr_names[i] for i in hr_inds]
+        self.heating_rates = hr_names
 
         # Begin loading data
         Times, O2convs, Temps, dXdt = [], [], [], []
@@ -98,7 +164,6 @@ class NonArrheniusBase(ABC):
             O2convs.append(np.interp(time_downsampled, Time, O2_conversion))
             dXdt.append(np.interp(time_downsampled, Time, dO2_conversion))
 
-        
         # # Append boundary conditions
         # # Left BC - set rate at 20C to be 0 for all conversions
         BC_TEMP = 20.0
@@ -163,8 +228,37 @@ class NonArrheniusBase(ABC):
         '''
         pass
     
+
+    def overlay_curves(self, data_list, legend_entries=None, save_path = None):
+        '''
+        data_dict - list of dictionary with keys 'Time', 'Temp', 'O2conv' to plot data
+        save_path - location to save the overlay
+        '''
+        plt.figure()
+        for i in range(len(self.heating_rates)):
+            plt.plot(self.Temps[i,:], self.O2convs[i,:], '--', 
+                        color=str(0.25+0.5*i/(len(self.heating_rates)-1)), ms=1.25)
+        legend_list = [str(h)+' C/min' for h in self.heating_rates]
+
+        for i in range(len(data_list)):
+            plt.plot(data_list[i]['Temp'], data_list[i]['O2conv'], ms=1.5)
+
+        if legend_entries is not None:
+            legend_list += legend_entries
+        
+        plt.title(r'$O_2$ Conversion Curves Overlay')
+        plt.xlabel('Temperature')
+        plt.ylabel(r'$O_2$ conversion')
+        plt.legend(legend_list, facecolor='white', framealpha=1)
+
+        if save_path is not None:
+            plt.savefig(save_path)
+            tikz.save(save_path)
+
+        plt.show()
+        
     
-    def print_consumption_curves(self, save_path = None):
+    def print_consumption_curves(self, save_path = None, legend=True):
         gradplt = plt.figure()
         convplt = plt.figure()
         gradax = gradplt.add_subplot(111)
@@ -174,39 +268,48 @@ class NonArrheniusBase(ABC):
             gradax.plot(self.Temps[i,:], self.dXdt[i,:])
             convax.plot(self.Temps[i,:], self.O2convs[i,:])
         
-        convax.set_title(self.oil_type + ' - ' + self.experiment)
+        convax.set_title(r'$O_2$ Conversion Curves')
         convax.set_xlabel('Temperature')
         convax.set_ylabel(r'$O_2$ conversion')
-        convax.legend([str(h)+' C/min' for h in self.heating_rates])
+        if legend:
+            convax.legend([str(h)+' C/min' for h in self.heating_rates])
         convplt.show()
         
-        gradax.set_title(self.oil_type + ' - ' + self.experiment)
+        gradax.set_title(r'$O_2$ Conversion Rate Curves')
         gradax.set_xlabel('Temperature')
         gradax.set_ylabel(r'$\frac{d O_2}{dt}$ conversion')
-        gradax.legend([str(h)+' C/min' for h in self.heating_rates])
+        if legend:
+            gradax.legend([str(h)+' C/min' for h in self.heating_rates])
 
         if isinstance(save_path, str):
             gradplt.savefig(save_path[:-4] + '_conversion' + save_path[-4:])
+            # tikz.save(save_path[:-4] + '_conversion' + save_path[-4:], figure=gradplt)
             convplt.savefig(save_path[:-4] + '_consumption' + save_path[-4:])
+            # tikz.save(save_path[:-4] + '_consumption' + save_path[-4:], figure=convplt)
 
         gradplt.show()
         
     
-    def print_surf_plot(self, save_path = None, vmin=None, vmax=None):
+    def print_surf_plot(self, save_path=None, vmin=None, vmax=None, legend=True):
         
         Tgrid, O2grid = np.mgrid[20:750:200j, 0:1:200j]
         dXdt = self.conversion_lookup(Tgrid, O2grid)
         plt.figure()
         plt.imshow(dXdt.T, extent=(20,750,0,1), aspect="auto", origin='lower', 
                     cmap=plt.get_cmap('hot'), vmin=vmin, vmax=vmax)
-        plt.plot(self.Temps.flatten(), self.O2convs.flatten(), 'w.', ms=1)
+        for i in range(len(self.heating_rates)):
+            plt.plot(self.Temps[i,:], self.O2convs[i,:], '--', color=str(0.3+0.5*i/(len(self.heating_rates)-1)), ms=1.25)
+        
+        if legend:
+            plt.legend([str(h)+' C/min' for h in self.heating_rates], facecolor='white', framealpha=1)
         plt.xlabel('Temperature (C)')
         plt.ylabel('Conversion (% consumption)')
-        # plt.title('Conversion rate surface')
+        plt.title('Conversion rate surface')
         plt.colorbar()
 
         if isinstance(save_path, str):
             plt.savefig(save_path)
+            tikz.save(save_path)
 
         print('Minimum conversion rate: {}, maximum conversion rate: {}'.format(dXdt.min(), dXdt.max()))
         plt.show()
@@ -293,12 +396,14 @@ class NonArrheniusBase(ABC):
             plt.savefig(save_path + '_temperature.png')
         plt.show()
 
-        
-    def compute_sim_mse(self, gt_data):
 
-        _, y = self.simulate_rto([0.0], [0,gt_data['Time']], [gt_data['Time'], gt_data['Temp']])
+    def compute_sim_mse(self, gt_data, sim_data):
+        y = sim_data['O2conv']
         y_gt = gt_data['O2conv']
-        MSE = np.sum((y - y_gt)**2)
+        tstart = np.argmax(y_gt>1e-3)
+        tend = np.minimum(np.argmax(y_gt>0.999), y.shape[0]-1)
+        time_int = gt_data['Time'][tend] - gt_data['Time'][tstart]
+        MSE = np.trapz((y[tstart:tend+1] - y_gt[tstart:tend+1])**2, x=gt_data['Time'][tstart:tend+1]) / time_int
         return MSE
 
 
@@ -346,7 +451,7 @@ class NonArrheniusML(NonArrheniusBase):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        kwargs.setdefault('constrained', False)
+        kwargs.setdefault('constrained', True)
 
         self.tau = 0.12
 
@@ -441,7 +546,7 @@ class NonArrheniusML(NonArrheniusBase):
         return dX, sigmas
 
 
-    def print_uncertainty_surf(self, save_path=None,vmin=None,vmax=None):
+    def print_uncertainty_surf(self, save_path=None, vmin=None, vmax=None, legend=True):
         '''
         Plot surface of variances across the estimation
 
@@ -452,10 +557,14 @@ class NonArrheniusML(NonArrheniusBase):
         plt.figure()
         plt.imshow(np.log(sigmas.T), extent=(20,750,0,1), aspect="auto", origin='lower', 
                     cmap=plt.get_cmap('plasma'),vmin=vmin,vmax=vmax)
-        plt.plot(self.Temps.flatten(), self.O2convs.flatten(), 'w.', ms=1)
+        for i in range(len(self.heating_rates)):
+            plt.plot(self.Temps[i,:], self.O2convs[i,:], '--', color=str(0.3+0.5*i/(len(self.heating_rates)-1)), ms=1.25)
+        
+        if legend:
+            plt.legend([str(h)+' C/min' for h in self.heating_rates])
         plt.xlabel('Temperature (C)')
         plt.ylabel('Conversion (% mol)')
-        # plt.title('Log-std. deviation of rate estimate')
+        plt.title('Log-std. deviation of rate estimate')
         plt.colorbar()
 
         if isinstance(save_path, str):

@@ -8,7 +8,7 @@ from .reactions import Component, Kinetics
 
 
 
-class MasterVKC(RtoBase):
+class NonArrVKC(RtoBase):
 
 
     def __init__(self, **kwargs):
@@ -82,13 +82,13 @@ class MasterVKC(RtoBase):
         print("""
 *GRID *CART 1 1 3
 *KDIR *DOWN
-*DI *CON 1.32
-*DJ *CON 1.32
-*DK *CON 3
+*DI *CON 6.2 
+*DJ *CON 6.2 
+*DK *CON 0.12
 *POR *CON 0.36
-*PERMI *CON 11400
-*PERMJ *CON 11400
-*PERMK *KVAR 11400 0 0
+*PERMI *CON 10000
+*PERMJ *CON 10000
+*PERMK *KVAR 10000 0 0
 *END-GRID
 
 **------------------------OTHER RESERVOIR PROPERTIES-----------------------------------
@@ -216,7 +216,7 @@ class MasterVKC(RtoBase):
         print('**  ==============  INITIAL CONDITIONS  ======================', file = fileID)
         print("""
 *INITIAL
-*PRES *CON   100
+*PRES *CON   780
 *TEMP *CON   {T_init}
 **VERTICAL OFF
 *SW *CON {WAT_SAT}
@@ -228,30 +228,7 @@ class MasterVKC(RtoBase):
 *MFRAC_GAS 'N2' *CON {N2_con}
 *MFRAC_GAS 'CO2' *CON 0.00
 *MFRAC_GAS 'CO' *CON 0.00
-*MFRAC_GAS 'O2' *CON {O2_con}
-
-**INITREGION 1
-**SW *IJK 
-**WAT_SAT
-**		 1 1 1:11 0.000
-**W_SATEND
-**         2 1 1:11 0.0
-
-**SO *IJK 
-**OIL_SAT
-**		 1 1 1:11 1.0
-**O_SATEND
-**         2 1 1:11 0.0
-
-**SG *IJK 
-**GAS_SAT
-**	     1 1 1:11 1.0
-**G_SATEND
-**         2 1 1:11 0.0
-
-**MFRAC_GAS 'N2' CON       1
-**MFRAC_GAS 'O2' *con 0.21
-**MFRAC_GAS 'N2' *con 0.79      
+*MFRAC_GAS 'O2' *CON {O2_con}     
 
               """.format(T_init=IC_dict['Temp'], WAT_SAT=0.0, OIL_SAT=IC_dict['Oil'], GAS_SAT=1-IC_dict['Oil'], 
                         O2_con=IC_dict['O2'], N2_con=1-IC_dict['O2']), 

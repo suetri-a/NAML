@@ -9,7 +9,7 @@ class RtoBase(ABC):
 
     @staticmethod
     def get_default_reaction():
-        pass
+        return None
 
 
     def __init__(self, folder_name = './', input_file_name = 'rto_experiment'):
@@ -25,7 +25,7 @@ class RtoBase(ABC):
     #
     ##############################################################################################
 
-    def write_dat_file(self, COMPS=None, REACTS=None, IC_dict=None, HR=None, 
+    def write_dat_file(self, COMPS=None, REACTS=None, IC_dict=None, HEATING_DATA=None, 
                         TFINAL=500, TEMP_MAX = 750, O2_con_in = 0.21):
         '''
         Inputs:
@@ -51,7 +51,7 @@ class RtoBase(ABC):
         self.print_numerical(fileID)
         self.print_recurrent(fileID, O2_con_in, COMPS)
         self.print_heater(fileID)
-        self.print_heating_ramp(fileID, HR, TFINAL, IC_dict['Temp'], TEMP_MAX)
+        self.print_heating_ramp(fileID, HEATING_DATA, TFINAL, IC_dict['Temp'], TEMP_MAX)
         fileID.close()
 
 
